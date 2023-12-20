@@ -12,6 +12,8 @@ import re
 # Import your model modules
 import kyelectra_train as kykim
 import snelectra_train as snunlp
+
+# Another model
 # import roberta_train as roberta
 
 # Suppress warnings
@@ -33,7 +35,7 @@ def load_and_predict(model_module, model_name, checkpoints, args):
     predictions = trainer.predict(model=model, datamodule=dataloader)
     return np.array([round(float(i), 1) for i in torch.cat(predictions)])
 
-def main(args):
+def main():
     prj_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(prj_dir)
     model_dir = os.path.join(parent_dir, "model")
@@ -61,25 +63,33 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--max_epoch', default=1, type=int)
-    # parser.add_argument('--alpha', default= 0.5, type=float)
+    parser.add_argument('--alpha', default= 0.5, type=float)
     parser.add_argument('--shuffle', default=True)
     parser.add_argument('--learning_rate', default=1e-5, type=float)
     parser.add_argument('--train_path', default='../data/train.csv')
     parser.add_argument('--dev_path', default='../data/dev.csv')
     parser.add_argument('--test_path', default='../data/dev.csv')
     parser.add_argument('--predict_path', default='../data/test.csv')
+    parser.add_argument('--save_path', default='../result_data/output.csv')
+    parser.add_argument('--ensemble_type', default= 'weighted')
     args = parser.parse_args()
 
-    pred_list, score_list = main(args)
+    pred_list, score_list = main()
     score_list = torch.Tensor(score_list)
     score = F.softmax(score_list)
+    score = score.numpy()
     output = pd.read_csv('../data/sample_submission.csv')
 
-    # Ensure you have three models for this operation
-    if len(pred_list) == 2:
-        # output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1] + pred_list[2] * score[2]) / 3, 1)
-        output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1]) / 2, 1)
-        output.to_csv('../result_data/ensemble_output_electras_avg_ver3.csv', index=False)
+    if args.ensemble_type == 'weighted':
+        # 모델의 개수에 따라 변경
+        # Weighted sum
+        output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1]), 1)
+        # output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1] + pred_list[2] * score[2]), 1)
+    else:
+        # Avg output
+        output['target'] = np.round((pred_list[0]+ pred_list[1]) / 2, 1)
+        # output['target'] = np.round((pred_list[0]+ pred_list[1]+ pred_list[2] ) / 3, 1)
+
+    output.to_csv(args.save_path, index=False)
