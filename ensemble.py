@@ -1,66 +1,85 @@
+import os
 import argparse
-
 import pandas as pd
-
-from tqdm.auto import tqdm
-
+import numpy as np
 import transformers
 import torch
-import torchmetrics
+import torch.nn.functional as F
 import pytorch_lightning as pl
-from electra_train import *
-from roberta_train import *
-import numpy as np
+import warnings
+import re
+
+# Import your model modules
+import kyelectra_train as kykim
+import snelectra_train as snunlp
+# import roberta_train as roberta
+
+# Suppress warnings
+transformers.logging.set_verbosity_error()
+warnings.filterwarnings("ignore")
+
+def load_and_predict(model_module, model_name, checkpoints, args):
+    dataloader = model_module.Dataloader(
+        model_name, 
+        args.batch_size, 
+        args.shuffle, 
+        args.train_path, 
+        args.dev_path,
+        args.test_path,
+        args.predict_path
+    )
+    trainer = pl.Trainer(accelerator="gpu", devices=1, max_epochs=args.max_epoch, log_every_n_steps=1)
+    model = model_module.Model.load_from_checkpoint(checkpoints)
+    predictions = trainer.predict(model=model, datamodule=dataloader)
+    return np.array([round(float(i), 1) for i in torch.cat(predictions)])
+
+def main(args):
+    prj_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(prj_dir)
+    model_dir = os.path.join(parent_dir, "model")
+    models_checkpoints = [os.path.join(model_dir, i) for i in os.listdir(model_dir) if i[-4:] == 'ckpt']
+
+    pred_list = []
+    score_list = []
+    for checkpoints in models_checkpoints:
+        pattern = r"val_pearson=([0-9]+\.[0-9]+)"
+        match = re.search(pattern, checkpoints)
+        if match:
+            score = float(match.group(1))
+            score_list.append(score)
+
+        if 'kykim' in checkpoints:
+            predictions = load_and_predict(kykim, 'kykim/electra-kor-base', checkpoints, args)
+        elif 'snunlp' in checkpoints:
+            predictions = load_and_predict(snunlp, 'snunlp/KR-ELECTRA-discriminator', checkpoints, args)
+        # else:
+        #     predictions = load_and_predict(roberta, 'klue/roberta-base', checkpoints, args)
+
+        pred_list.append(predictions)
+
+    return pred_list, score_list
 
 if __name__ == '__main__':
-    # 하이퍼 파라미터 등 각종 설정값을 입력받습니다
-    # 터미널 실행 예시 : python3 run.py --batch_size=64 ...
-    # 실행 시 '--batch_size=64' 같은 인자를 입력하지 않으면 default 값이 기본으로 실행됩니다
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name1', default='klue/roberta-base', type=str)
-    parser.add_argument('--model_name2', default='snunlp/KR-ELECTRA-discriminator', type=str)
+    parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--max_epoch', default=1, type=int)
+    # parser.add_argument('--alpha', default= 0.5, type=float)
     parser.add_argument('--shuffle', default=True)
     parser.add_argument('--learning_rate', default=1e-5, type=float)
     parser.add_argument('--train_path', default='../data/train.csv')
     parser.add_argument('--dev_path', default='../data/dev.csv')
     parser.add_argument('--test_path', default='../data/dev.csv')
     parser.add_argument('--predict_path', default='../data/test.csv')
-    args = parser.parse_args(args=[])
-    #-------------------------------------------------------------------------------------------
-    # roberta
-    # dataloader와 model을 생성
-    roberta_dataloader = Dataloader(args.model_name1, args.batch_size, args.shuffle, args.train_path, args.dev_path,
-                            args.test_path, args.predict_path)
-    roberta_trainer = pl.Trainer(accelerator="gpu", devices=1, max_epochs=args.max_epoch, log_every_n_steps=1)
+    args = parser.parse_args()
 
-    # Inference part
-    # 저장된 모델1으로 예측을 진행
-    roberta_model = torch.load('../model/aug_roberta_model.pt')
-    roberta_predictions = roberta_trainer.predict(model=roberta_model, datamodule=roberta_dataloader)
-
-    # 예측된 결과를 형식에 맞게 반올림하여 준비합니다.
-    roberta_predictions = np.array(list(round(float(i), 1) for i in torch.cat(roberta_predictions)))
-    #-------------------------------------------------------------------------------------------
-    # electra
-    electra_dataloader = Dataloader(args.model_name2, args.batch_size, args.shuffle, args.train_path, args.dev_path,
-                            args.test_path, args.predict_path)
-    electra_trainer = pl.Trainer(accelerator="gpu", devices=1, max_epochs=args.max_epoch, log_every_n_steps=1)
-
-    # Inference part
-    # 저장된 모델2로 예측을 진행
-    electra_model = torch.load('../model/aug_electra_model.pt')
-    electra_predictions = electra_trainer.predict(model=electra_model, datamodule=electra_dataloader)
-
-    # 예측된 결과를 형식에 맞게 반올림하여 준비합니다.
-    electra_predictions = np.array(list(round(float(i), 1) for i in torch.cat(electra_predictions)))
-    #-------------------------------------------------------------------------------------------
-    # Model Weight
-    roberta_weight = 0.4
-    electra_weight = 0.6
+    pred_list, score_list = main(args)
+    score_list = torch.Tensor(score_list)
+    score = F.softmax(score_list)
     output = pd.read_csv('../data/sample_submission.csv')
-    # ensemble: Weighted sum
-    # 다른 방법으로 변경 가능
-    output['target'] = np.round((roberta_predictions * roberta_weight + electra_predictions * electra_weight) / 2, 1)
-    output.to_csv('../result_data/ansemble_output.csv', index=False)
+
+    # Ensure you have three models for this operation
+    if len(pred_list) == 2:
+        # output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1] + pred_list[2] * score[2]) / 3, 1)
+        output['target'] = np.round((pred_list[0] * score[0] + pred_list[1] * score[1]) / 2, 1)
+        output.to_csv('../result_data/ensemble_output_electras_avg_ver3.csv', index=False)

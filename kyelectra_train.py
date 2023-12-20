@@ -11,8 +11,15 @@ import torchmetrics
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint
 import wandb
+import warnings
 
+# 경고 제거
+transformers.logging.set_verbosity_error()
+warnings.filterwarnings("ignore", ".*does not have many workers.*")
+warnings.filterwarnings("ignore", ".*TensorBoard support*")
+warnings.filterwarnings("ignore", ".*target is close to zero*")
 # seed 고정
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
@@ -131,13 +138,15 @@ class Model(pl.LightningModule):
         self.lr = lr
 
         # 사용할 모델을 호출합니다.
+
         self.plm = transformers.AutoModelForSequenceClassification.from_pretrained(
             pretrained_model_name_or_path=model_name, num_labels=1)
-        # Loss 계산을 위해 사용될 L1Loss를 호출합니다.
+        # Loss 계산을 위해 사용될 SmoothL1Loss를 호출
         self.loss_func = torch.nn.SmoothL1Loss()
-        self.drop = torch.nn.Dropout(p = 0.4)
+        # self.drop = torch.nn.Dropout(p = 0.4)
     def forward(self, x):
-        x = self.drop(self.plm(x)['logits'])
+        # x = self.drop(self.plm(x)['logits'])
+        x = self.plm(x)['logits']
         return x
 
     def training_step(self, batch, batch_idx):
@@ -169,19 +178,19 @@ class Model(pl.LightningModule):
         logits = self(x)
 
         return logits.squeeze()
-
+    
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
-        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda = lambda epoch: 0.95 ** epoch)
-        # return {"optimizer": optimizer, "lr_scheduler": scheduler}
-        return optimizer
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay= 0.5)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda = lambda epoch: 0.95 ** epoch)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
 
 if __name__ == '__main__':
-    # 하이퍼 파라미터 등 각종 설정값을 입력받습니다
-    # 터미널 실행 예시 : python3 run.py --batch_size=64 ...
-    # 실행 시 '--batch_size=64' 같은 인자를 입력하지 않으면 default 값이 기본으로 실행됩니다
+    # kykim/electra-kor-base
+    # snunlp/KR-ELECTRA-discriminator
+    # monologg/koelectra-base-v3-discriminator
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', default='klue/roberta-base', type=str)
+    parser.add_argument('--model_name', default='kykim/electra-kor-base', type=str)
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--max_epoch', default=1, type=int)
     parser.add_argument('--shuffle', default=True)
@@ -196,26 +205,31 @@ if __name__ == '__main__':
                             args.test_path, args.predict_path)
     
     model = Model(args.model_name, args.learning_rate)
-    wandb_logger = WandbLogger(name = 'aug_sm_max3drop_roberta',
+    wandb_logger = WandbLogger(name = 'aug_kyelectra_ver2',
                                project = 'nlp_9')
     early_stop_callback = EarlyStopping(
         monitor='val_pearson',
         min_delta=0.001,
-        patience=5,
+        patience=3,
         verbose=True,
         mode='max'
+        )
+    checkpoint_callback = ModelCheckpoint(
+        monitor='val_pearson',  # Monitor the validation Pearson coefficient
+        mode='max',             # Mode 'max' because you want to maximize this metric
+        save_top_k=1,           # Save only the top 1 model
+        filename= 'kykim'+ '-'+'{epoch}-{val_pearson:.4f}',  # Filename includes epoch and metric
+        verbose=True,
+        dirpath = '../model/'
         )
     trainer = pl.Trainer(accelerator="gpu",
                          logger = wandb_logger,
                          devices=1,
                          max_epochs=args.max_epoch,
                          log_every_n_steps=1,
-                         callbacks=[early_stop_callback])
+                         callbacks=[early_stop_callback, checkpoint_callback])
 
     # Train part
     trainer.fit(model=model, datamodule=dataloader)
     trainer.test(model=model, datamodule=dataloader)
-
-    # 모델 저장
-    torch.save(model, '../model/aug_sm_max3drop_roberta_model.pt')
 
